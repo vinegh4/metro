@@ -17,24 +17,28 @@ impl Clone for MetroPacket {
 }
 
 trait MetroApp {
-    fn rx_callback(&self, packet: MetroPacket);
-    fn send(&self, packe: MetroPacket);
+    fn rx_callback(&mut self, packet: MetroPacket);
+    fn send(&self, packet: MetroPacket);
 }
 
 struct Metro<'a, T: MetroTcvr> {
-    apps: [Option<&'a dyn MetroApp>; 256],
-    tcvr: &'a T,
+    apps: [Option<&'a mut dyn MetroApp>; 256],
+    tcvr: T,
 }
 
 impl<'a, T: MetroTcvr> Metro<'a, T> {
-    fn new(tcvr: &'a T) -> Metro<'a, T> {
-        let apps = [None; 256];
+    fn new(tcvr: T) -> Metro<'a, T> {
+        let apps = core::array::from_fn(|_| None);
         Metro { apps, tcvr }
     }
 
-    fn process(&self) {
+    fn bind(&mut self, port: usize, app: &'a mut dyn MetroApp) {
+        self.apps[port] = Some(app);
+    }
+
+    fn process(&mut self) {
         if let Some(packet) = self.tcvr.recv() {
-            if let Some(app) = self.apps[packet.port as usize] {
+            if let Some(app) = &mut self.apps[packet.port as usize] {
                 app.rx_callback(packet);
             }
         }
@@ -75,8 +79,8 @@ mod tests {
             pf_rx: RefCell<VecDeque<MetroPacket>>,
         ) -> TestMetroTcvr {
             TestMetroTcvr {
-                packet_fifo_tx: pf_tx,
-                packet_fifo_rx: pf_rx,
+                packet_fifo_tx: pf_tx.clone(),
+                packet_fifo_rx: pf_rx.clone(),
             }
         }
     }
@@ -112,7 +116,7 @@ mod tests {
     }
 
     impl<'a> MetroApp for TestMetroApp<'a> {
-        fn rx_callback(&self, packet: MetroPacket) {
+        fn rx_callback(&mut self, packet: MetroPacket) {
             self.packet_rx_count += 1;
             self.last_rx_packet = Some(packet.clone());
         }
@@ -122,19 +126,21 @@ mod tests {
         }
     }
 
-    fn setup() {
-        let packet_fifo_mosi: RefCell<VecDeque<MetroPacket>> = RefCell::new(VecDeque::new());
-        let packet_fifo_miso: RefCell<VecDeque<MetroPacket>> = RefCell::new(VecDeque::new());
-
-        let tcvr_master = TestMetroTcvr::new(packet_fifo_mosi, packet_fifo_miso);
-        let tcvr_slave = TestMetroTcvr::new(packet_fifo_miso, packet_fifo_mosi);
-    }
-
     #[test]
     fn test_send() {
-        let packet_fifo_mosi: RefCell<VecDeque<MetroPacket>> = RefCell::new(VecDeque::new());
-        let packet_fifo_miso: RefCell<VecDeque<MetroPacket>> = RefCell::new(VecDeque::new());
+        let packet_fifo_aobi: RefCell<VecDeque<MetroPacket>> = RefCell::new(VecDeque::new());
+        let packet_fifo_aibo: RefCell<VecDeque<MetroPacket>> = RefCell::new(VecDeque::new());
 
-        let tcvr_master = TestMetroTcvr::new(packet_fifo_mosi, packet_fifo_miso);
+        let tcvr_a = TestMetroTcvr::new(packet_fifo_aobi.clone(), packet_fifo_aibo.clone());
+        let tcvr_b = TestMetroTcvr::new(packet_fifo_aibo.clone(), packet_fifo_aobi.clone());
+
+        let mut metro_a = Metro::new(tcvr_a);
+        let mut metro_b = Metro::new(tcvr_b);
+
+        let mut test_metro_app_a = TestMetroApp::new(&metro_a);
+        let mut test_metro_app_b = TestMetroApp::new(&metro_b);
+
+        metro_a.bind(0, &mut test_metro_app_a);
+        metro_b.bind(0, &mut test_metro_app_b);
     }
 }
