@@ -1,9 +1,23 @@
-#![cfg_attr(not(test), no_std)]
+//#![cfg_attr(not(test), no_std)]
 
+#[derive(Debug)]
 struct MetroPacket {
     port: u8,
     data: [u8; 256],
     data_len: u8,
+}
+
+impl MetroPacket {
+    fn new() -> MetroPacket {
+        let data = [0; 256];
+        let port = 0;
+        let data_len = 0;
+        MetroPacket {
+            port,
+            data,
+            data_len,
+        }
+    }
 }
 
 impl Clone for MetroPacket {
@@ -16,29 +30,24 @@ impl Clone for MetroPacket {
     }
 }
 
-trait MetroApp {
+trait MetroApp<T: MetroTcvr> {
     fn rx_callback(&mut self, packet: MetroPacket);
-    fn send(&self, packet: MetroPacket);
+    fn send(&mut self, metro: &Metro<T>, packet: MetroPacket);
 }
 
-struct Metro<'a, T: MetroTcvr> {
-    apps: [Option<&'a mut dyn MetroApp>; 256],
+struct Metro<T: MetroTcvr> {
     tcvr: T,
 }
 
-impl<'a, T: MetroTcvr> Metro<'a, T> {
-    fn new(tcvr: T) -> Metro<'a, T> {
-        let apps = core::array::from_fn(|_| None);
-        Metro { apps, tcvr }
+impl<'a, T: MetroTcvr> Metro<T> {
+    fn new(tcvr: T) -> Metro<T> {
+        Metro { tcvr }
     }
 
-    fn bind(&mut self, port: usize, app: &'a mut dyn MetroApp) {
-        self.apps[port] = Some(app);
-    }
-
-    fn process(&mut self) {
+    fn process(&self, apps: &mut [Option<&'a mut dyn MetroApp<T>>]) {
         if let Some(packet) = self.tcvr.recv() {
-            if let Some(app) = &mut self.apps[packet.port as usize] {
+            println!("packet recieved!");
+            if let Some(app) = &mut apps[packet.port as usize] {
                 app.rx_callback(packet);
             }
         }
@@ -95,34 +104,33 @@ mod tests {
         }
     }
 
-    struct TestMetroApp<'a> {
-        packet_rx_count: usize,
-        packet_tx_count: usize,
-        last_tx_packet: Option<MetroPacket>,
-        last_rx_packet: Option<MetroPacket>,
-        metro_inst: &'a Metro<'a, TestMetroTcvr>,
+    struct TestMetroApp {
+        pub packet_rx_count: usize,
+        pub packet_tx_count: usize,
+        pub last_tx_packet: Option<MetroPacket>,
+        pub last_rx_packet: Option<MetroPacket>,
     }
 
-    impl<'a> TestMetroApp<'a> {
-        fn new(metro: &'a Metro<'a, TestMetroTcvr>) -> TestMetroApp<'a> {
+    impl<'a> TestMetroApp {
+        fn new() -> TestMetroApp {
             TestMetroApp {
                 packet_rx_count: 0,
                 packet_tx_count: 0,
                 last_tx_packet: None,
                 last_rx_packet: None,
-                metro_inst: metro,
             }
         }
     }
 
-    impl<'a> MetroApp for TestMetroApp<'a> {
+    impl<'a> MetroApp<TestMetroTcvr> for TestMetroApp {
         fn rx_callback(&mut self, packet: MetroPacket) {
             self.packet_rx_count += 1;
             self.last_rx_packet = Some(packet.clone());
         }
 
-        fn send(&self, packet: MetroPacket) {
-            self.metro_inst.send(packet);
+        fn send(&mut self, metro: &Metro<TestMetroTcvr>, packet: MetroPacket) {
+            self.packet_tx_count += 1;
+            metro.send(packet);
         }
     }
 
@@ -134,13 +142,36 @@ mod tests {
         let tcvr_a = TestMetroTcvr::new(packet_fifo_aobi.clone(), packet_fifo_aibo.clone());
         let tcvr_b = TestMetroTcvr::new(packet_fifo_aibo.clone(), packet_fifo_aobi.clone());
 
-        let mut metro_a = Metro::new(tcvr_a);
-        let mut metro_b = Metro::new(tcvr_b);
+        let metro_a = Metro::new(tcvr_a);
+        let metro_b = Metro::new(tcvr_b);
 
-        let mut test_metro_app_a = TestMetroApp::new(&metro_a);
-        let mut test_metro_app_b = TestMetroApp::new(&metro_b);
+        let mut test_metro_app_a = TestMetroApp::new();
+        let mut test_metro_app_b = TestMetroApp::new();
 
-        metro_a.bind(0, &mut test_metro_app_a);
-        metro_b.bind(0, &mut test_metro_app_b);
+        let mut apps_a: [Option<&mut dyn MetroApp<TestMetroTcvr>>; 256] =
+            core::array::from_fn(|_| None);
+        apps_a[0] = Some(&mut test_metro_app_a);
+
+        let mut apps_b: [Option<&mut dyn MetroApp<TestMetroTcvr>>; 256] =
+            core::array::from_fn(|_| None);
+        apps_b[0] = Some(&mut test_metro_app_b);
+
+        let mut test_packet = MetroPacket::new();
+
+        test_packet.data[0] = 0xEF;
+        test_packet.data[1] = 0xBE;
+        test_packet.data[2] = 0xAD;
+        test_packet.data[3] = 0xDE;
+
+        test_packet.data_len = 4;
+
+        test_metro_app_a.send(&metro_a, test_packet);
+        dbg!(packet_fifo_aobi.borrow().len());
+
+        assert_eq!(test_metro_app_a.packet_tx_count, 1);
+
+        metro_b.process(&mut apps_b);
+
+        assert_eq!(test_metro_app_b.packet_rx_count, 1);
     }
 }
